@@ -47,16 +47,14 @@ pub(crate) struct Proxy {
 
 impl Proxy {
     pub(crate) async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        if let Some(auth) = &self.auth {
-            if !self.is_authorized(&req) {
-                return Ok(Response::builder()
-                    .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
-                    .header("Proxy-Authenticate", "Basic realm=\"Proxy\"")
-                    .body(Body::empty())
-                    .unwrap());
-            }
+        if self.auth.is_some() && !self.is_authorized(&req) {
+            return Ok(Response::builder()
+                .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                .header("Proxy-Authenticate", "Basic realm=\"Proxy\"")
+                .body(Body::empty())
+                .unwrap());
         }
-
+    
         match if req.method() == Method::CONNECT {
             self.process_connect(req).await
         } else {
@@ -68,15 +66,13 @@ impl Proxy {
     }
 
     fn is_authorized(&self, req: &Request<Body>) -> bool {
-        if let Some(auth) = &self.auth {
+        self.auth.as_ref().map_or(true, |auth| {
             req.headers()
                 .get("Proxy-Authorization")
                 .and_then(|value| value.to_str().ok())
                 .map(|value| value == format!("Basic {}", auth))
                 .unwrap_or(false)
-        } else {
-            true
-        }
+        })
     }
 
     async fn process_connect(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {

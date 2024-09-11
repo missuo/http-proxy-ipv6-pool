@@ -2,7 +2,7 @@ use hyper::{
     client::HttpConnector,
     server::conn::AddrStream,
     service::{make_service_fn, service_fn},
-    Body, Client, Method, Request, Response, Server,
+    Body, Client, Method, Request, Response, Server, StatusCode,
 };
 use rand::Rng;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
@@ -14,15 +14,20 @@ use tokio::{
 pub async fn start_proxy(
     listen_addr: SocketAddr,
     (ipv6, prefix_len): (Ipv6Addr, u8),
+    auth: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let make_service = make_service_fn(move |_: &AddrStream| async move {
-        Ok::<_, hyper::Error>(service_fn(move |req| {
-            Proxy {
-                ipv6: ipv6.into(),
-                prefix_len,
-            }
-            .proxy(req)
-        }))
+    let make_service = make_service_fn(move |_: &AddrStream| {
+        let auth = auth.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                Proxy {
+                    ipv6: ipv6.into(),
+                    prefix_len,
+                    auth: auth.clone(),
+                }
+                .proxy(req)
+            }))
+        }
     });
 
     Server::bind(&listen_addr)
@@ -37,10 +42,21 @@ pub async fn start_proxy(
 pub(crate) struct Proxy {
     pub ipv6: u128,
     pub prefix_len: u8,
+    pub auth: Option<String>,
 }
 
 impl Proxy {
     pub(crate) async fn proxy(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        if let Some(auth) = &self.auth {
+            if !self.is_authorized(&req) {
+                return Ok(Response::builder()
+                    .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                    .header("Proxy-Authenticate", "Basic realm=\"Proxy\"")
+                    .body(Body::empty())
+                    .unwrap());
+            }
+        }
+
         match if req.method() == Method::CONNECT {
             self.process_connect(req).await
         } else {
@@ -48,6 +64,18 @@ impl Proxy {
         } {
             Ok(resp) => Ok(resp),
             Err(e) => Err(e),
+        }
+    }
+
+    fn is_authorized(&self, req: &Request<Body>) -> bool {
+        if let Some(auth) = &self.auth {
+            req.headers()
+                .get("Proxy-Authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value == format!("Basic {}", auth))
+                .unwrap_or(false)
+        } else {
+            true
         }
     }
 

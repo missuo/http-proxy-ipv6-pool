@@ -2,8 +2,10 @@ use cidr::Ipv6Cidr;
 use getopts::Options;
 use std::{env, process::exit, net::SocketAddr};
 use base64;
+use log::{info, error};
+use env_logger::Env;
 
-mod proxy; // 确保 proxy.rs 在同一目录下
+mod proxy;
 use crate::proxy::{start_http_proxy, start_socks5_proxy};
 
 fn print_usage(program: &str, opts: Options) {
@@ -13,6 +15,9 @@ fn print_usage(program: &str, opts: Options) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logger
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+
     let args: Vec<String> = env::args().collect();
     let program = args[0].clone();
 
@@ -32,7 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => {
-            panic!("{}", f.to_string())
+            error!("Failed to parse command line arguments: {}", f);
+            exit(1);
         }
     };
 
@@ -65,24 +71,57 @@ async fn run(
             let b = cidr.network_length();
             (a, b)
         }
-        Err(_) => {
-            println!("invalid IPv6 subnet");
+        Err(e) => {
+            error!("Invalid IPv6 subnet: {}", e);
             exit(1);
         }
     };
 
-    let http_bind_addr: SocketAddr = http_bind_addr.parse()?;
-    let socks_bind_addr: SocketAddr = socks_bind_addr.parse()?;
+    let http_bind_addr: SocketAddr = match http_bind_addr.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!("Invalid HTTP bind address: {}", e);
+            exit(1);
+        }
+    };
+
+    let socks_bind_addr: SocketAddr = match socks_bind_addr.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!("Invalid SOCKS5 bind address: {}", e);
+            exit(1);
+        }
+    };
 
     let auth = match (username, password) {
         (Some(u), Some(p)) => Some(base64::encode(format!("{}:{}", u, p))),
-        _ => None,
+        (None, None) => None,
+        _ => {
+            error!("Both username and password must be provided for authentication");
+            exit(1);
+        }
     };
+
+    info!("Starting proxy server with IPv6 subnet: {}", ipv6_subnet);
+    if auth.is_some() {
+        info!("Authentication enabled");
+    }
 
     let http_future = start_http_proxy(http_bind_addr, ipv6, auth.clone());
     let socks_future = start_socks5_proxy(socks_bind_addr, ipv6, auth);
 
-    tokio::try_join!(http_future, socks_future)?;
+    tokio::select! {
+        result = http_future => {
+            if let Err(e) = result {
+                error!("HTTP proxy error: {}", e);
+            }
+        }
+        result = socks_future => {
+            if let Err(e) = result {
+                error!("SOCKS5 proxy error: {}", e);
+            }
+        }
+    }
 
     Ok(())
 }

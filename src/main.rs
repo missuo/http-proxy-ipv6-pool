@@ -1,22 +1,24 @@
-mod proxy;
-
 use cidr::Ipv6Cidr;
 use getopts::Options;
-use proxy::start_proxy;
-use std::{env, process::exit};
+use std::{env, process::exit, net::SocketAddr};
 use base64;
+
+mod proxy; // 确保 proxy.rs 在同一目录下
+use crate::proxy::{start_http_proxy, start_socks5_proxy};
 
 fn print_usage(program: &str, opts: Options) {
     let brief = format!("Usage: {} [options]", program);
     print!("{}", opts.usage(&brief));
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let program = args[0].clone();
 
     let mut opts = Options::new();
-    opts.optopt("b", "bind", "http proxy bind address", "BIND");
+    opts.optopt("b", "bind", "HTTP proxy bind address", "BIND");
+    opts.optopt("s", "socks", "SOCKS5 proxy bind address", "SOCKS");
     opts.optopt(
         "i",
         "ipv6-subnet",
@@ -36,21 +38,27 @@ fn main() {
 
     if matches.opt_present("h") {
         print_usage(&program, opts);
-        return;
+        return Ok(());
     }
 
-    let bind_addr = matches.opt_str("b").unwrap_or("0.0.0.0:51080".to_string());
+    let http_bind_addr = matches.opt_str("b").unwrap_or("0.0.0.0:51080".to_string());
+    let socks_bind_addr = matches.opt_str("s").unwrap_or("0.0.0.0:51090".to_string());
     let ipv6_subnet = matches
         .opt_str("i")
         .unwrap_or("2001:19f0:6001:48e4::/64".to_string());
     let username = matches.opt_str("u");
     let password = matches.opt_str("p");
 
-    run(bind_addr, ipv6_subnet, username, password)
+    run(http_bind_addr, socks_bind_addr, ipv6_subnet, username, password).await
 }
 
-#[tokio::main]
-async fn run(bind_addr: String, ipv6_subnet: String, username: Option<String>, password: Option<String>) {
+async fn run(
+    http_bind_addr: String,
+    socks_bind_addr: String,
+    ipv6_subnet: String,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let ipv6 = match ipv6_subnet.parse::<Ipv6Cidr>() {
         Ok(cidr) => {
             let a = cidr.first_address();
@@ -63,20 +71,18 @@ async fn run(bind_addr: String, ipv6_subnet: String, username: Option<String>, p
         }
     };
 
-    let bind_addr = match bind_addr.parse() {
-        Ok(b) => b,
-        Err(e) => {
-            println!("bind address not valid: {}", e);
-            return;
-        }
-    };
+    let http_bind_addr: SocketAddr = http_bind_addr.parse()?;
+    let socks_bind_addr: SocketAddr = socks_bind_addr.parse()?;
 
     let auth = match (username, password) {
         (Some(u), Some(p)) => Some(base64::encode(format!("{}:{}", u, p))),
         _ => None,
     };
 
-    if let Err(e) = start_proxy(bind_addr, ipv6, auth).await {
-        println!("{}", e);
-    }
+    let http_future = start_http_proxy(http_bind_addr, ipv6, auth.clone());
+    let socks_future = start_socks5_proxy(socks_bind_addr, ipv6, auth);
+
+    tokio::try_join!(http_future, socks_future)?;
+
+    Ok(())
 }
